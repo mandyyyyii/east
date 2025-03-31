@@ -486,7 +486,8 @@ class DPOTrainer(Trainer):
         self.use_entropy_non_linear_coeff = args.use_entropy_non_linear_coeff
         self.use_chosen_weight_non_linear = args.use_chosen_weight_non_linear
         self.use_chosen_weight_non_linear_coeff = args.use_chosen_weight_non_linear_coeff
-        self.use_chosen_weight_non_linear_rev = args.use_chosen_weight_non_linear_rev
+        self.use_rejected_weight_non_linear = args.use_rejected_weight_non_linear
+        self.use_rejected_weight_non_linear_coeff = args.use_rejected_weight_non_linear_coeff
 
         self.aux_loss_coef = getattr(model.config, "router_aux_loss_coef", 0.0)
         if self.aux_loss_enabled and self.aux_loss_coef == 0.0:
@@ -1036,18 +1037,17 @@ class DPOTrainer(Trainer):
                 """Calculate weight based on chosen_weight values."""
                 return chosen_weight**self.use_chosen_weight_non_linear/self.use_chosen_weight_non_linear_coeff
             
-            def _calculate_chosen_weight_non_linear_rev(self, chosen_weight):
-                """Calculate weight based on chosen_weight values."""
-                return (1-chosen_weight)**self.use_chosen_weight_non_linear/self.use_chosen_weight_non_linear_coeff
-
+            def _calculate_rejected_weight_non_linear(self, rejected_weight):
+                """Calculate weight based on rejected_weight values."""
+                return rejected_weight**self.use_rejected_weight_non_linear/self.use_rejected_weight_non_linear_coeff
 
             if self.use_chosen_weight_non_linear:
-                if self.use_chosen_weight_non_linear_rev:
-                    weight = _calculate_chosen_weight_non_linear_rev(self, batch["chosen_weight"])
-                else:
-                    weight = _calculate_chosen_weight_non_linear(self, batch["chosen_weight"])
+                weight = _calculate_chosen_weight_non_linear(self, batch["chosen_weight"])
             elif self.use_entropy_non_linear:
                 weight = _calculate_entropy_weight_non_linear(self, batch["entropy"])
+
+            elif self.use_rejected_weight_non_linear:
+                weight = _calculate_rejected_weight_non_linear(self, batch["rejected_weight"])
             output["policy_weights"] = weight
         if self.loss_type == "ipo":
             all_logps = all_logps / loss_mask.sum(-1)

@@ -33,6 +33,34 @@ if __name__ == "__main__":
         help="Use entropy non linear coeff value"
     )
 
+    parser.add_argument(
+        "--use_chosen_weight_non_linear",
+        type=float,
+        default=0,
+        help="Use chosen weight non linear value"
+    )
+
+    parser.add_argument(
+        "--use_chosen_weight_non_linear_coeff",
+        type=float,
+        default=0,
+        help="Use chosen weight non linear coeff value"
+    )
+
+    parser.add_argument(
+        "--use_rejected_weight_non_linear",
+        type=float,
+        default=0,
+        help="Use rejected weight non linear value"
+    )
+
+    parser.add_argument(
+        "--use_rejected_weight_non_linear_coeff",
+        type=float,
+        default=0,
+        help="Use rejected weight non linear coeff value"
+    )
+
 
     parser.add_argument(
         "--data_seed_t",
