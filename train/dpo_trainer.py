@@ -1130,6 +1130,11 @@ class DPOTrainer(Trainer):
         with compute_loss_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
 
+        # Check if we need multiple backward passes (for trainer4 compatibility)
+        if hasattr(self.args, 'multiple_backward_passes') and self.args.multiple_backward_passes:
+            # Split loss for multiple backward passes with DeepSpeed Zero compatibility
+            loss = self._handle_multiple_backward_loss(loss, model)
+
         # Make sure to move the loss to the device the original accumulating loss is at back in the `Trainer` class:
         loss = loss.to(self.args.device)
         # force log the metrics
@@ -1139,6 +1144,168 @@ class DPOTrainer(Trainer):
             return loss, metrics
 
         return loss
+    
+    def _handle_multiple_backward_loss(self, loss, model):
+        """
+        Handle multiple backward passes in a DeepSpeed Zero compatible way.
+        Instead of calling backward() multiple times, we accumulate gradients manually.
+        """
+        # For DeepSpeed Zero compatibility, we need to avoid multiple backward calls
+        # Instead, we'll compute secondary losses and add them to the main loss
+        
+        # Check if model has DeepSpeed engine
+        is_deepspeed = hasattr(model, 'module') and hasattr(model, 'backward')
+        
+        if is_deepspeed and self.is_deepspeed_enabled:
+            # With DeepSpeed, we cannot call backward() multiple times
+            # So we compute additional loss components and combine them
+            return self._compute_combined_loss_for_deepspeed(loss, model)
+        else:
+            # Without DeepSpeed, we can use traditional multiple backward approach
+            return self._compute_multiple_backward_traditional(loss, model)
+    
+    def _compute_combined_loss_for_deepspeed(self, primary_loss, model):
+        """
+        Compute combined loss for DeepSpeed Zero compatibility.
+        This avoids multiple backward calls which are not supported in DeepSpeed Zero.
+        """
+        # Start with primary loss
+        total_loss = primary_loss
+        
+        # Add any additional loss components that would normally require separate backward passes
+        # For example, if trainer4 needs regularization or auxiliary losses
+        
+        # Example: Add L2 regularization as secondary loss component
+        if hasattr(self.args, 'l2_reg_weight') and self.args.l2_reg_weight > 0:
+            l2_loss = 0
+            for param in model.parameters():
+                if param.requires_grad:
+                    l2_loss += torch.norm(param, p=2) ** 2
+            l2_loss *= self.args.l2_reg_weight
+            total_loss = total_loss + l2_loss
+        
+        # Example: Add auxiliary loss if configured
+        if hasattr(self.args, 'aux_loss_weight') and self.args.aux_loss_weight > 0:
+            # Compute auxiliary loss here
+            aux_loss = self._compute_auxiliary_loss(model)
+            total_loss = total_loss + self.args.aux_loss_weight * aux_loss
+        
+        return total_loss
+    
+    def _compute_multiple_backward_traditional(self, primary_loss, model):
+        """
+        Traditional multiple backward approach for non-DeepSpeed training.
+        Note: This should only be used when DeepSpeed is not enabled.
+        """
+        # This is kept for compatibility but not recommended with DeepSpeed
+        return primary_loss
+    
+    def _compute_auxiliary_loss(self, model):
+        """
+        Compute auxiliary loss that would normally require a separate backward pass.
+        This can be customized based on your specific trainer4 requirements.
+        """
+        # Example auxiliary loss computation
+        # Replace this with your actual auxiliary loss logic
+        aux_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
+        
+        # Example: Compute some auxiliary loss based on model activations
+        # This is just a placeholder - implement your specific logic here
+        
+        return aux_loss
+
+    def training_step(self, model, inputs):
+        """
+        Override training step to handle multiple backward passes with DeepSpeed Zero compatibility.
+        """
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        if hasattr(self.args, 'multiple_backward_passes') and self.args.multiple_backward_passes:
+            return self._training_step_with_multiple_losses(model, inputs)
+        else:
+            # Default training step
+            return super().training_step(model, inputs)
+
+    def _training_step_with_multiple_losses(self, model, inputs):
+        """
+        Custom training step that handles multiple losses in a DeepSpeed Zero compatible way.
+        """
+        if self.is_deepspeed_enabled:
+            # With DeepSpeed, compute combined loss and do single backward
+            return self._deepspeed_training_step_multiple_losses(model, inputs)
+        else:
+            # Without DeepSpeed, can do traditional multiple backward
+            return self._traditional_training_step_multiple_losses(model, inputs)
+
+    def _deepspeed_training_step_multiple_losses(self, model, inputs):
+        """
+        DeepSpeed compatible training step with multiple loss components.
+        """
+        from torch.cuda.amp import autocast
+        
+        with autocast(enabled=self.use_amp):
+            # Compute primary loss
+            loss = self.compute_loss(model, inputs)
+            
+            # Add any additional loss terms that would normally require separate backward passes
+            if hasattr(self.args, 'secondary_loss_weight') and self.args.secondary_loss_weight > 0:
+                secondary_loss = self._compute_secondary_loss(model, inputs)
+                loss = loss + self.args.secondary_loss_weight * secondary_loss
+
+        # Scale loss for gradient accumulation
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        # Use DeepSpeed's backward method
+        if hasattr(model, 'backward'):
+            model.backward(loss)
+        else:
+            self.accelerator.backward(loss)
+
+        return loss.detach()
+
+    def _traditional_training_step_multiple_losses(self, model, inputs):
+        """
+        Traditional training step with actual multiple backward passes.
+        Only use this when not using DeepSpeed.
+        """
+        # First backward pass
+        loss1 = self.compute_loss(model, inputs)
+        if self.args.gradient_accumulation_steps > 1:
+            loss1 = loss1 / self.args.gradient_accumulation_steps
+        
+        self.accelerator.backward(loss1)
+        
+        # Second backward pass if configured
+        if hasattr(self.args, 'enable_second_backward') and self.args.enable_second_backward:
+            loss2 = self._compute_secondary_loss(model, inputs)
+            if self.args.gradient_accumulation_steps > 1:
+                loss2 = loss2 / self.args.gradient_accumulation_steps
+            
+            self.accelerator.backward(loss2)
+            
+            return (loss1 + loss2).detach()
+        
+        return loss1.detach()
+
+    def _compute_secondary_loss(self, model, inputs):
+        """
+        Compute secondary loss for multiple backward scenarios.
+        Customize this method based on your specific trainer4 requirements.
+        """
+        # Example secondary loss computation
+        # This could be auxiliary loss, regularization, or any other loss component
+        
+        # Placeholder implementation - customize as needed
+        secondary_loss = torch.tensor(0.0, device=model.device, requires_grad=True)
+        
+        # Example: Compute consistency loss or regularization
+        if hasattr(self.args, 'consistency_loss_enabled') and self.args.consistency_loss_enabled:
+            # Implement your consistency loss here
+            pass
+            
+        return secondary_loss
 
     def generate_from_model_and_ref(self, model, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
